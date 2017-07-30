@@ -286,10 +286,10 @@ mk_envelope(Messages, Headers) when is_list(Messages),is_list(Headers) ->
 %%% --------------------------------------------------------------------
 initModel(WsdlFile) ->
     initModel(WsdlFile, ?DEFAULT_PREFIX, []).
+initModel(WsdlFile, HttpClientOptions) when is_list(HttpClientOptions) ->
+    initModel(WsdlFile, ?DEFAULT_PREFIX, HttpClientOptions);
 initModel(WsdlFile, Prefix) ->
     initModel(WsdlFile, Prefix, []).
-initModel(WsdlFile, HttpClientOptions) when is_list(HttpClientOptions) ->
-    initModel(WsdlFile, ?DEFAULT_PREFIX, HttpClientOptions).
 initModel(WsdlFile, Prefix, HttpClientOptions) ->
     PrivDir = priv_dir(),
     initModel2(WsdlFile, Prefix, PrivDir, undefined, HttpClientOptions, undefined).
