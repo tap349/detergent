@@ -9,7 +9,7 @@
 
 -module(detergent).
 
--export([initModel/1, initModel/2,
+-export([initModel/1, initModel/2, initModel/3,
      initModelFile/1,
      config_file_xsd/0,
      call/3, call/4, call/5, call/6, call/7,
@@ -220,9 +220,12 @@ call_attach(#wsdl{operations = Operations, model = Model},
                 _ ->
                    Url
             end,
-            HttpRes = http_request(URL, SoapAction, Request,
-                                           HttpClientOptions, HttpHeaders,
-                                           ContentType),
+            HttpRes = http_request(URL,
+                                   SoapAction,
+                                   Request,
+                                   HttpClientOptions,
+                                   HttpHeaders,
+                                   ContentType),
                     ?dbg("+++ HttpRes = ~p~n", [HttpRes]),
             case HttpRes of
             {ok, _Code, _ReturnHeaders, Body} ->
@@ -282,11 +285,14 @@ mk_envelope(Messages, Headers) when is_list(Messages),is_list(Headers) ->
 %%% Parse a WSDL file and return a 'Model'
 %%% --------------------------------------------------------------------
 initModel(WsdlFile) ->
-    initModel(WsdlFile, ?DEFAULT_PREFIX).
-
+    initModel(WsdlFile, ?DEFAULT_PREFIX, []).
 initModel(WsdlFile, Prefix) ->
+    initModel(WsdlFile, Prefix, []).
+initModel(WsdlFile, HttpClientOptions) when is_list(HttpClientOptions) ->
+    initModel(WsdlFile, ?DEFAULT_PREFIX, HttpClientOptions).
+initModel(WsdlFile, Prefix, HttpClientOptions) ->
     PrivDir = priv_dir(),
-    initModel2(WsdlFile, Prefix, PrivDir, undefined, undefined).
+    initModel2(WsdlFile, Prefix, PrivDir, undefined, HttpClientOptions, undefined).
 
 initModelFile(ConfigFile) ->
     {ok, ConfigSchema} = erlsom:compile_xsd(config_file_xsd()),
@@ -296,7 +302,7 @@ initModelFile(ConfigFile) ->
               wsdl_file = Wsdl,
               add_files = AddFiles} = Config,
     #xsd_file{name = WsdlFile, prefix = Prefix, import_specs = Import} = Wsdl,
-    initModel2(WsdlFile, Prefix, XsdPath, Import, AddFiles).
+    initModel2(WsdlFile, Prefix, XsdPath, Import, [], AddFiles).
 
 priv_dir() ->
     case code:priv_dir(detergent) of
@@ -306,7 +312,7 @@ priv_dir() ->
             A
     end.
 
-initModel2(WsdlFile, Prefix, Path, Import, AddFiles) ->
+initModel2(WsdlFile, Prefix, Path, Import, HttpClientOptions, AddFiles) ->
     WsdlName = filename:join([Path, "wsdl.xsd"]),
     IncludeWsdl = {"http://schemas.xmlsoap.org/wsdl/", "wsdl", WsdlName},
     {ok, WsdlModel} = erlsom:compile_xsd_file(filename:join([Path, "soap.xsd"]),
@@ -317,7 +323,13 @@ initModel2(WsdlFile, Prefix, Path, Import, AddFiles) ->
     IncludeDir = filename:dirname(WsdlFile),
     Options = [{dir_list, [IncludeDir]} | makeOptions(Import)],
     %% parse Wsdl
-    {Model, Operations} = parseWsdls([WsdlFile], Prefix, WsdlModel2, Options, {undefined, []}),
+    {Model, Operations} = parseWsdls(
+                            [WsdlFile],
+                            Prefix,
+                            WsdlModel2,
+                            Options,
+                            HttpClientOptions,
+                            {undefined, []}),
     %% TODO: add files as required
     %% now compile envelope.xsd, and add Model
     {ok, EnvelopeModel} = erlsom:compile_xsd_file(filename:join([Path, "envelope.xsd"]),
@@ -331,10 +343,10 @@ initModel2(WsdlFile, Prefix, Path, Import, AddFiles) ->
 %%% Parse a list of WSDLs and import (recursively)
 %%% Returns {Model, Operations}
 %%% --------------------------------------------------------------------
-parseWsdls([], _Prefix, _WsdlModel, _Options, Acc) ->
+parseWsdls([], _Prefix, _WsdlModel, _Options, _HttpClientOptions, Acc) ->
   Acc;
-parseWsdls([WsdlFile | Tail], Prefix, WsdlModel, Options, {AccModel, AccOperations}) ->
-  {ok, WsdlFileContent} = get_url_file(rmsp(WsdlFile)),
+parseWsdls([WsdlFile | Tail], Prefix, WsdlModel, Options, HttpClientOptions, {AccModel, AccOperations}) ->
+  {ok, WsdlFileContent} = get_url_file(rmsp(WsdlFile), HttpClientOptions),
   {ok, ParsedWsdl, _} = erlsom:scan(WsdlFileContent, WsdlModel),
   %% get the xsd elements from this model, and hand it over to erlsom_compile.
   Xsds = getXsdsFromWsdl(ParsedWsdl),
@@ -352,8 +364,8 @@ parseWsdls([WsdlFile | Tail], Prefix, WsdlModel, Options, {AccModel, AccOperatio
   %% processed as well).
   %% For the moment, the namespace is ignored on operations etc.
   %% this makes it a bit easier to deal with imported wsdl's.
-  Acc3 = parseWsdls(Imports, Prefix, WsdlModel, Options, Acc2),
-  parseWsdls(Tail, Prefix, WsdlModel, Options, Acc3).
+  Acc3 = parseWsdls(Imports, Prefix, WsdlModel, Options, HttpClientOptions, Acc2),
+  parseWsdls(Tail, Prefix, WsdlModel, Options, HttpClientOptions, Acc3).
 
 %%% --------------------------------------------------------------------
 %%% build a list: [{Namespace, Xsd}, ...] for all the Xsds in the WSDL.
@@ -392,15 +404,15 @@ addSchemas([Xsd| Tail], AccModel, Prefix, Options, ImportList) ->
 %%% --------------------------------------------------------------------
 %%% Get a file from an URL spec.
 %%% --------------------------------------------------------------------
-get_url_file(URL) ->
+get_url_file(URL, HttpClientOptions) ->
     case xmerl_uri:parse(URL) of
-        {http, _, _, _, _} -> get_remote_file(URL);
-        {https, _, _, _, _} -> get_remote_file(URL);
+        {http, _, _, _, _} -> get_remote_file(URL, HttpClientOptions);
+        {https, _, _, _, _} -> get_remote_file(URL, HttpClientOptions);
         _Other -> get_local_file(URL)
     end.
 
-get_remote_file(URL) ->
-    case httpc:request(URL) of
+get_remote_file(URL, HttpClientOptions) ->
+    case httpc:request(get, {URL, []}, HttpClientOptions, []) of
     {ok,{{_HTTP,200,_OK}, _Headers, Body}} ->
         {ok, Body};
     {ok,{{_HTTP,RC,Emsg}, _Headers, _Body}} ->
@@ -418,17 +430,17 @@ get_local_file(Fname) ->
 %%% --------------------------------------------------------------------
 %%% Make a HTTP Request
 %%% --------------------------------------------------------------------
-http_request(URL, SoapAction, Request, Options, Headers, ContentType) ->
+http_request(URL, SoapAction, Request, HttpClientOptions, Headers, ContentType) ->
     case code:ensure_loaded(ibrowse) of
     {module, ibrowse} ->
         %% If ibrowse exist in the path then let's use it...
-        ibrowse_request(URL, SoapAction, Request, Options, Headers, ContentType);
+        ibrowse_request(URL, SoapAction, Request, HttpClientOptions, Headers, ContentType);
     _ ->
         %% ...otherwise, let's use the OTP http client.
-        inets_request(URL, SoapAction, Request, Options, Headers, ContentType)
+        inets_request(URL, SoapAction, Request, HttpClientOptions, Headers, ContentType)
     end.
 
-inets_request(URL, SoapAction, Request, Options, Headers, ContentType) ->
+inets_request(URL, SoapAction, Request, HttpClientOptions, Headers, ContentType) ->
     NHeaders = [{"SOAPAction", SoapAction}|Headers],
     NewHeaders = case proplists:get_value("Host", NHeaders) of
                      undefined ->
@@ -436,13 +448,12 @@ inets_request(URL, SoapAction, Request, Options, Headers, ContentType) ->
                      _ ->
                          NHeaders
                  end,
-    NewOptions = [{cookies, enabled}|Options],
-    httpc:set_options(NewOptions),
+    Options = [{cookies, enabled}|HttpClientOptions],
+    HttpOptions = [{timeout,?HTTP_REQ_TIMEOUT}|HttpClientOptions],
+    httpc:set_options(Options),
     case httpc:request(post,
-                      {URL,NewHeaders,
-                       ContentType,
-                       Request},
-                      [{timeout,?HTTP_REQ_TIMEOUT}],
+                      {URL, NewHeaders, ContentType, Request},
+                      HttpOptions,
                       [{sync, true}, {full_result, true}, {body_format, string}]) of
         {ok,{{_HTTP,200,_OK},ResponseHeaders,ResponseBody}} ->
             {ok, 200, ResponseHeaders, ResponseBody};
@@ -454,12 +465,12 @@ inets_request(URL, SoapAction, Request, Options, Headers, ContentType) ->
             Other
     end.
 
-ibrowse_request(URL, SoapAction, Request, Options, Headers, ContentType) ->
+ibrowse_request(URL, SoapAction, Request, HttpClientOptions, Headers, ContentType) ->
     case start_ibrowse() of
         ok ->
             NewHeaders = [{"Content-Type", ContentType}, {"SOAPAction", SoapAction} | Headers],
-            NewOptions = Options,
-                         %%[{content_type, "text/xml; encoding=utf-8"} | Options],
+            NewOptions = HttpClientOptions,
+                         %%[{content_type, "text/xml; encoding=utf-8"} | HttpClientOptions],
             case ibrowse:send_req(URL, NewHeaders, post, Request, NewOptions) of
                 {ok, Status, ResponseHeaders, ResponseBody} ->
                     {ok, list_to_integer(Status), ResponseHeaders, ResponseBody};
